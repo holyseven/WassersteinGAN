@@ -12,13 +12,14 @@ import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import models.dcgan as dcgan
 import models.mlp as mlp
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', required=True, help='cifar10 | lsun | imagenet | folder | lfw ')
-parser.add_argument('--dataroot', required=True, help='path to dataset')
+parser.add_argument('--dataset', help='cifar10 | lsun | imagenet | folder | lfw ', default='cifar10')
+parser.add_argument('--dataroot', help='path to dataset', default='data')
 parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
 parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
 parser.add_argument('--imageSize', type=int, default=64, help='the height / width of the input image to network')
@@ -30,7 +31,7 @@ parser.add_argument('--niter', type=int, default=25, help='number of epochs to t
 parser.add_argument('--lrD', type=float, default=0.00005, help='learning rate for Critic, default=0.00005')
 parser.add_argument('--lrG', type=float, default=0.00005, help='learning rate for Generator, default=0.00005')
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
-parser.add_argument('--cuda'  , action='store_true', help='enables cuda')
+parser.add_argument('--cuda', action='store_true', help='enables cuda', default=True)
 parser.add_argument('--ngpu'  , type=int, default=1, help='number of GPUs to use')
 parser.add_argument('--netG', default='', help="path to netG (to continue training)")
 parser.add_argument('--netD', default='', help="path to netD (to continue training)")
@@ -50,7 +51,7 @@ if opt.experiment is None:
     opt.experiment = 'samples'
 os.system('mkdir {0}'.format(opt.experiment))
 
-opt.manualSeed = random.randint(1, 10000) # fix seed
+opt.manualSeed = 3823  # fix seed.
 print("Random Seed: ", opt.manualSeed)
 random.seed(opt.manualSeed)
 torch.manual_seed(opt.manualSeed)
@@ -156,8 +157,9 @@ for epoch in range(opt.niter):
         ############################
         # (1) Update D network
         ###########################
-        for p in netD.parameters(): # reset requires_grad
-            p.requires_grad = True # they are set to False below in netG update
+        for p in netD.parameters():  # reset requires_grad
+            p.requires_grad = True  # they are set to False below in netG update:
+        # just to avoid computation  # not sure how much computation can be saved.
 
         # train the discriminator Diters times
         if gen_iterations < 25 or gen_iterations % 500 == 0:
@@ -186,41 +188,46 @@ for epoch in range(opt.niter):
             inputv = Variable(input)
 
             errD_real = netD(inputv)
-            errD_real.backward(one)
 
             # train with fake
             noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
-            noisev = Variable(noise, volatile = True) # totally freeze netG
+            noisev = Variable(noise, requires_grad=False)
             fake = Variable(netG(noisev).data)
             inputv = fake
             errD_fake = netD(inputv)
-            errD_fake.backward(mone)
-            errD = errD_real - errD_fake
+            ws_distance = errD_real - errD_fake  # max_D{errD_real - errD_fake}
+            negative_ws_distance = -1.0 * ws_distance  # min_D{errD_fake - errD_real}
+            # This should be equivalent to min_D{errD_real - errD_fake} and min_G{errD_fake}.
+            # see https://github.com/martinarjovsky/WassersteinGAN/issues/9#issuecomment-278701638.
+            # But here we use the same as in the paper.
+
+            negative_ws_distance.backward()
             optimizerD.step()
 
         ############################
         # (2) Update G network
         ###########################
         for p in netD.parameters():
-            p.requires_grad = False # to avoid computation
+            p.requires_grad = False  # to avoid computation  # not sure how much computation can be saved.
+
         netG.zero_grad()
         # in case our last batch was the tail batch of the dataloader,
         # make sure we feed a full batch of noise
         noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
-        noisev = Variable(noise)
+        noisev = Variable(noise, requires_grad=False)
         fake = netG(noisev)
-        errG = netD(fake)
-        errG.backward(one)
+        errG = -1.0 * netD(fake)  # min_G{errD_real - errD_fake} <=> min_G{-errD_fake}
+        errG.backward()
         optimizerG.step()
         gen_iterations += 1
 
         print('[%d/%d][%d/%d][%d] Loss_D: %f Loss_G: %f Loss_D_real: %f Loss_D_fake %f'
             % (epoch, opt.niter, i, len(dataloader), gen_iterations,
-            errD.data[0], errG.data[0], errD_real.data[0], errD_fake.data[0]))
+               ws_distance.data[0], errG.data[0], errD_real.data[0], errD_fake.data[0]))
         if gen_iterations % 500 == 0:
             real_cpu = real_cpu.mul(0.5).add(0.5)
             vutils.save_image(real_cpu, '{0}/real_samples.png'.format(opt.experiment))
-            fake = netG(Variable(fixed_noise, volatile=True))
+            fake = netG(Variable(fixed_noise, requires_grad=True))
             fake.data = fake.data.mul(0.5).add(0.5)
             vutils.save_image(fake.data, '{0}/fake_samples_{1}.png'.format(opt.experiment, gen_iterations))
 
